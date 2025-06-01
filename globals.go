@@ -91,6 +91,19 @@ type typecheck struct {
 	generated map[string]bool
 }
 
+func newTypecheck() *typecheck {
+	return &typecheck{
+		Files:   []*ast.File{},
+		FileSet: token.NewFileSet(),
+		Info: &types.Info{
+			Defs: make(map[*ast.Ident]types.Object),
+			Uses: make(map[*ast.Ident]types.Object),
+		},
+		source:    map[string]*ast.File{},
+		generated: map[string]bool{},
+	}
+}
+
 func (tc *typecheck) File(name string) (*ast.File, bool) {
 	if f, ok := tc.source[name]; ok {
 		return f, tc.generated[name]
@@ -98,14 +111,20 @@ func (tc *typecheck) File(name string) (*ast.File, bool) {
 	return nil, false
 }
 
+func (tc *typecheck) Check(dir string) error {
+	conf := types.Config{
+		Importer: importer.ForCompiler(tc.FileSet, "source", nil),
+	}
+	_, err := conf.Check(dir, tc.FileSet, tc.Files, tc.Info)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // parseAndTypeCheck parses all .go files in dir and returns the files, fset, and info.
 func parseAndTypeCheck(dir string) (*typecheck, error) {
-	typecheck := &typecheck{
-		Files:     []*ast.File{},
-		FileSet:   token.NewFileSet(),
-		source:    map[string]*ast.File{},
-		generated: map[string]bool{},
-	}
+	typecheck := newTypecheck()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading directory %s: %w", dir, err)
@@ -125,16 +144,7 @@ func parseAndTypeCheck(dir string) (*typecheck, error) {
 		typecheck.generated[filename] = isGeneratedFile(filename)
 	}
 
-	typecheck.Info = &types.Info{
-		Defs: make(map[*ast.Ident]types.Object),
-		Uses: make(map[*ast.Ident]types.Object),
-	}
-
-	conf := types.Config{
-		Importer: importer.ForCompiler(typecheck.FileSet, "source", nil),
-	}
-	_, err = conf.Check(dir, typecheck.FileSet, typecheck.Files, typecheck.Info)
-	if err != nil {
+	if err := typecheck.Check(dir); err != nil {
 		return nil, err
 	}
 	return typecheck, nil
