@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/importer"
@@ -15,7 +16,21 @@ import (
 	"strings"
 )
 
+type options struct {
+	inits      bool
+	vars       bool
+	skipErrors bool
+	skipTests  bool
+}
+
 func main() {
+	var opts options
+	flag.BoolVar(&opts.vars, "vars", true, "report global variables")
+	flag.BoolVar(&opts.inits, "only-init", true, "report init functions")
+	flag.BoolVar(&opts.skipErrors, "skip-errors", true, "omit global variables of type error")
+	flag.BoolVar(&opts.skipTests, "skip-tests", true, "omit analyzing test files")
+	flag.Parse()
+
 	workingDir, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -23,11 +38,15 @@ func main() {
 	}
 
 	var path string
-	switch len(os.Args) {
-	case 1:
+	args := flag.Args()
+	switch len(args) {
+	case 0:
 		path = workingDir
-	case 2:
-		path = os.Args[1]
+	case 1:
+		path = args[0]
+		if path == "./..." || path == "." {
+			path = workingDir
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "Usage: globals [path]")
 		os.Exit(2)
@@ -46,9 +65,12 @@ func main() {
 			}
 			return nil
 		}
+		if opts.skipTests && strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
 
 		if filepath.Ext(path) == ".go" {
-			if err := processFile(typecheck, path, workingDir); err != nil {
+			if err := processFile(typecheck, path, workingDir, opts); err != nil {
 				return err
 			}
 		}
@@ -139,10 +161,10 @@ func isGeneratedFile(filename string) bool {
 	return false
 }
 
-// errorIface is the type of the built-in error interface.
-var errorIface = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
+// errorInterface is the type of the built-in error interface.
+var errorInterface = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
 
-func processFile(tc map[string]*typecheck, filename, workingDir string) error {
+func processFile(tc map[string]*typecheck, filename, workingDir string, opts options) error {
 	var err error
 	pkg, ok := tc[filename]
 	if !ok {
@@ -158,20 +180,32 @@ func processFile(tc map[string]*typecheck, filename, workingDir string) error {
 		return nil
 	}
 	for _, decl := range file.Decls {
-		// Global variables
-		genDecl, ok := decl.(*ast.GenDecl)
-		if !ok || genDecl.Tok != token.VAR {
+		if opts.inits {
+			analyzeInit(decl, pkg, workingDir) // init() functions
+		}
+		if opts.vars {
+			analyzeGlobalVar(decl, pkg, workingDir, opts) // global variables
+		}
+	}
+	return nil
+}
+
+func analyzeGlobalVar(decl ast.Decl, pkg *typecheck, workingDir string, opts options) {
+	// Global variables
+	genDecl, ok := decl.(*ast.GenDecl)
+	if !ok || genDecl.Tok != token.VAR {
+		return
+	}
+	for _, spec := range genDecl.Specs {
+		valueSpec, ok := spec.(*ast.ValueSpec)
+		if !ok {
 			continue
 		}
-		for _, spec := range genDecl.Specs {
-			valueSpec, ok := spec.(*ast.ValueSpec)
-			if !ok {
+		for _, name := range valueSpec.Names {
+			if name.String() == "_" {
 				continue
 			}
-			for _, name := range valueSpec.Names {
-				if name.String() == "_" {
-					continue
-				}
+			if opts.skipErrors {
 				// Skip variables of type error.
 				obj := pkg.Info.Defs[name]
 				if obj != nil {
@@ -182,23 +216,24 @@ func processFile(tc map[string]*typecheck, filename, workingDir string) error {
 							continue
 						}
 						// Implements error interface
-						if types.Implements(typ, errorIface) || types.Implements(types.NewPointer(typ), errorIface) {
+						if types.Implements(typ, errorInterface) || types.Implements(types.NewPointer(typ), errorInterface) {
 							continue
 						}
 					}
 				}
-				report(pkg.FileSet, name, "var", "", workingDir)
+
 			}
+			report(pkg.FileSet, name, "var", "", workingDir)
 		}
 	}
-	// init() functions
-	for _, decl := range file.Decls {
-		funcDecl, ok := decl.(*ast.FuncDecl)
-		if ok && funcDecl.Recv == nil && funcDecl.Name.Name == "init" {
-			report(pkg.FileSet, funcDecl.Name, "", "function", workingDir)
-		}
+}
+
+// analyzeInit checks if the given declaration is an init function and reports it.
+func analyzeInit(decl ast.Decl, pkg *typecheck, workingDir string) {
+	funcDecl, ok := decl.(*ast.FuncDecl)
+	if ok && funcDecl.Recv == nil && funcDecl.Name.Name == "init" {
+		report(pkg.FileSet, funcDecl.Name, "", "function", workingDir)
 	}
-	return nil
 }
 
 func report(fset *token.FileSet, name *ast.Ident, prefix, suffix, workingDir string) {
