@@ -115,10 +115,17 @@ func (tc *typecheck) File(name string) (*ast.File, bool) {
 }
 
 func (tc *typecheck) Check(dir string) error {
+	// Using default importer typically will only work in case where the build cache is hot,
+	// and using ForCompiler is too slow. We try the default importer first,
+	// and if it fails with "can't find import", we fall back to ForCompiler.
 	conf := types.Config{
-		Importer: importer.ForCompiler(tc.FileSet, "source", nil),
+		Importer: importer.Default(),
 	}
 	_, err := conf.Check(dir, tc.FileSet, tc.Files, tc.Info)
+	if err != nil && strings.Contains(err.Error(), "can't find import") {
+		conf.Importer = importer.ForCompiler(tc.FileSet, "source", nil)
+		_, err = conf.Check(dir, tc.FileSet, tc.Files, tc.Info)
+	}
 	if err != nil {
 		return err
 	}
@@ -126,7 +133,7 @@ func (tc *typecheck) Check(dir string) error {
 }
 
 func (tc *typecheck) AddFile(filename string) error {
-	f, err := parser.ParseFile(tc.FileSet, filename, nil, 0)
+	f, err := parser.ParseFile(tc.FileSet, filename, nil, parser.SkipObjectResolution)
 	if err != nil {
 		return fmt.Errorf("parsing: %w", err)
 	}
@@ -204,7 +211,7 @@ func (tc *typecheck) analyzeInit(decl ast.Decl, workingDir string) {
 }
 
 func isExternalPackageTest(filename string) bool {
-	f, err := parser.ParseFile(token.NewFileSet(), filename, nil, parser.PackageClauseOnly)
+	f, err := parser.ParseFile(token.NewFileSet(), filename, nil, parser.PackageClauseOnly|parser.SkipObjectResolution)
 	return err == nil && f.Name != nil && strings.HasSuffix(f.Name.Name, "_test")
 }
 
