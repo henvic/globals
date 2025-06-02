@@ -17,18 +17,20 @@ import (
 )
 
 type options struct {
-	inits      bool
-	vars       bool
-	skipErrors bool
-	skipTests  bool
+	inits  bool
+	vars   bool
+	errors bool
+	regexp bool
+	tests  bool
 }
 
 func main() {
 	var opts options
 	flag.BoolVar(&opts.vars, "vars", true, "report global variables")
-	flag.BoolVar(&opts.inits, "only-init", true, "report init functions")
-	flag.BoolVar(&opts.skipErrors, "skip-errors", true, "omit global variables of type error")
-	flag.BoolVar(&opts.skipTests, "skip-tests", true, "omit analyzing test files")
+	flag.BoolVar(&opts.inits, "inits", true, "report init functions")
+	flag.BoolVar(&opts.errors, "include-errors", false, "don't omit global variables of type error")
+	flag.BoolVar(&opts.regexp, "include-regexp", false, "don't omit global variables of type *regexp.Regexp (regular expressions)")
+	flag.BoolVar(&opts.tests, "include-tests", false, "don't omit analyzing test files")
 	flag.Parse()
 
 	workingDir, err := os.Getwd()
@@ -66,7 +68,7 @@ func main() {
 			}
 			return nil
 		}
-		if opts.skipTests && strings.HasSuffix(path, "_test.go") {
+		if !opts.tests && strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 
@@ -164,12 +166,10 @@ func (tc *typecheck) analyzeGlobalVar(decl ast.Decl, workingDir string, opts opt
 			if name.String() == "_" {
 				break
 			}
-			if opts.skipErrors {
+			if !opts.errors {
 				// Skip variables of type error.
-				obj := tc.Info.Defs[name]
-				if obj != nil {
-					typ := obj.Type()
-					if typ != nil {
+				if obj := tc.Info.Defs[name]; obj != nil {
+					if typ := obj.Type(); typ != nil {
 						// Directly error type.
 						if typ.String() == "error" {
 							break
@@ -180,7 +180,15 @@ func (tc *typecheck) analyzeGlobalVar(decl ast.Decl, workingDir string, opts opt
 						}
 					}
 				}
-
+			}
+			if !opts.regexp {
+				// Skip variables of type *regexp.Regexp.
+				if obj := tc.Info.Defs[name]; obj != nil {
+					typ := obj.Type()
+					if typ != nil && typ.String() == "*regexp.Regexp" {
+						break
+					}
+				}
 			}
 			report(tc.FileSet, name, "var", "", workingDir)
 		}
@@ -201,7 +209,7 @@ func isExternalPackageTest(filename string) bool {
 }
 
 // parseAndTypeCheck parses all .go files in dir and returns the files, fsets, and info.
-func parseAndTypeCheck(dir string, skipTests bool) (pkgTC *typecheck, extTC *typecheck, err error) {
+func parseAndTypeCheck(dir string, tests bool) (pkgTC *typecheck, extTC *typecheck, err error) {
 	pkgTC = newTypecheck()
 	extTC = newTypecheck()
 	entries, err := os.ReadDir(dir)
@@ -219,7 +227,7 @@ func parseAndTypeCheck(dir string, skipTests bool) (pkgTC *typecheck, extTC *typ
 
 		filename := filepath.Join(dir, entry.Name())
 		if strings.HasSuffix(entry.Name(), "_test.go") {
-			if skipTests {
+			if !tests {
 				continue
 			}
 
@@ -273,7 +281,7 @@ func processFile(pkgCache, extCache map[string]*typecheck, filename, workingDir 
 	pkgTC, pkgOK := pkgCache[dir]
 	extTC, extOK := extCache[dir]
 	if !pkgOK || !extOK {
-		pkgTC, extTC, err = parseAndTypeCheck(dir, opts.skipTests)
+		pkgTC, extTC, err = parseAndTypeCheck(dir, opts.tests)
 		if err != nil {
 			return err
 		}

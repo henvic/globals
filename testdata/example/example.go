@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"regexp"
 )
 
 var (
@@ -24,6 +25,9 @@ var (
 	ErrMoreFool                   = ErrorFool{}
 	ErrFew, ErrMulti              = ErrorFool{}, ErrBar
 	ErrUninitializedPointer *ErrorPointer
+
+	HexColor  = regexp.MustCompile(`#(?:[0-9a-fA-F]{3}){1,2}\b`)
+	SomeRegex *regexp.Regexp
 )
 
 const (

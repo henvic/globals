@@ -1,6 +1,7 @@
 # globals
-A command-line tool to help you identify and reduce global state on your source code.
-It reports mutable names such as of global variables (except errors) and init functions.
+A command-line tool to help you identify and reduce global state on your Go source code (global variables and init() functions).
+
+By default this tool doesn't report global variables for errors and regular expressions (regex).
 
 ## Install
 
@@ -12,7 +13,7 @@ go install github.com/henvic/globals@latest
 Run the tool in your project directory to list all global variables:
 
 ```shell
-$ globals ./...
+$ globals
 ```
 
 Some flags are available:
@@ -20,17 +21,20 @@ Some flags are available:
 ```shell
 $ globals -h
 Usage of globals:
-  -only-init
+  -include-errors
+    	don't omit global variables of type error
+  -include-regexp
+    	don't omit global variables of type *regexp.Regexp (regular expressions)
+  -include-tests
+    	don't omit analyzing test files
+  -inits
     	report init functions (default true)
-  -skip-errors
-    	omit global variables of type error (default true)
-  -skip-tests
-    	omit analyzing test files (default true)
   -vars
     	report global variables (default true)
 ```
 
 ## Example output
+
 ```shell
 $ globals
 main.go:8: init function
