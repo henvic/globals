@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 )
@@ -24,7 +25,24 @@ type options struct {
 	tests  bool
 }
 
+type Directory struct {
+	path          string
+	pkgCache      map[string]*typecheck
+	externalCache map[string]*typecheck
+	externalFiles map[string]struct{}
+}
+
+func NewDirectory(path string) *Directory {
+	return &Directory{
+		path:          path,
+		pkgCache:      map[string]*typecheck{},
+		externalCache: map[string]*typecheck{}, // external tests
+		externalFiles: map[string]struct{}{},
+	}
+}
+
 func main() {
+	debug.SetGCPercent(-1)
 	var opts options
 	flag.BoolVar(&opts.vars, "vars", true, "report global variables")
 	flag.BoolVar(&opts.inits, "inits", true, "report init functions")
@@ -54,8 +72,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	pkgCache := map[string]*typecheck{}
-	extCache := map[string]*typecheck{}
+	directories := map[string]*Directory{}
 	if err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -73,9 +90,16 @@ func main() {
 		}
 
 		if filepath.Ext(path) == ".go" {
-			if err := processFile(pkgCache, extCache, path, workingDir, opts); err != nil {
-				return err
+			dir, ok := directories[filepath.Dir(path)]
+			if !ok {
+				dir = NewDirectory(filepath.Dir(path))
+				directories[dir.path] = dir
+
+				if err = dir.parseAndTypeCheck(opts.tests); err != nil {
+					return err
+				}
 			}
+			processFile(dir, path, workingDir, opts)
 		}
 		return nil
 	}); err != nil {
@@ -216,12 +240,13 @@ func isExternalPackageTest(filename string) bool {
 }
 
 // parseAndTypeCheck parses all .go files in dir and returns the files, fsets, and info.
-func parseAndTypeCheck(dir string, tests bool) (pkgTC *typecheck, extTC *typecheck, err error) {
-	pkgTC = newTypecheck()
-	extTC = newTypecheck()
-	entries, err := os.ReadDir(dir)
+func (dir *Directory) parseAndTypeCheck(tests bool) (err error) {
+	pkgTC, extTC := newTypecheck(), newTypecheck()
+	dir.pkgCache[dir.path] = pkgTC
+	dir.externalCache[dir.path] = extTC
+	entries, err := os.ReadDir(dir.path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("reading directory %s: %w", dir, err)
+		return fmt.Errorf("reading directory %s: %w", dir.path, err)
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
@@ -232,7 +257,7 @@ func parseAndTypeCheck(dir string, tests bool) (pkgTC *typecheck, extTC *typeche
 		// if the file is an external test package.
 		tc := pkgTC
 
-		filename := filepath.Join(dir, entry.Name())
+		filename := filepath.Join(dir.path, entry.Name())
 		if strings.HasSuffix(entry.Name(), "_test.go") {
 			if !tests {
 				continue
@@ -240,22 +265,23 @@ func parseAndTypeCheck(dir string, tests bool) (pkgTC *typecheck, extTC *typeche
 
 			// Check if the file is part of an external test package.
 			if isExternalPackageTest(filename) {
-				tc = extTC // If it's an external test package, use the separate external typecheck.
+				tc = dir.externalCache[dir.path] // If it's an external test package, use the separate external typecheck.
+				dir.externalFiles[filename] = struct{}{}
 			}
 		}
 
 		if err := tc.AddFile(filename); err != nil {
-			return nil, nil, err
+			return err
 		}
 	}
 
-	if err := pkgTC.Check(dir); err != nil {
-		return nil, nil, err
+	if err := pkgTC.Check(dir.path); err != nil {
+		return err
 	}
-	if err := extTC.Check(dir); err != nil {
-		return nil, nil, fmt.Errorf("test package: %w", err)
+	if err := extTC.Check(dir.path); err != nil {
+		return fmt.Errorf("test package: %w", err)
 	}
-	return pkgTC, extTC, nil
+	return nil
 }
 
 // Source of the Regex comes from the Go standard library: https://go-review.googlesource.com/c/go/+/283633
@@ -282,26 +308,14 @@ func isGeneratedFile(filename string) bool {
 // errorInterface is the type of the built-in error interface.
 var errorInterface = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
 
-func processFile(pkgCache, extCache map[string]*typecheck, filename, workingDir string, opts options) error {
-	var err error
-	dir := filepath.Dir(filename)
-	pkgTC, pkgOK := pkgCache[dir]
-	extTC, extOK := extCache[dir]
-	if !pkgOK || !extOK {
-		pkgTC, extTC, err = parseAndTypeCheck(dir, opts.tests)
-		if err != nil {
-			return err
-		}
-		pkgCache[dir] = pkgTC
-		extCache[dir] = extTC
-	}
-	if pkgTC != nil {
+func processFile(dir *Directory, filename, workingDir string, opts options) {
+	if _, external := dir.externalFiles[filename]; external {
+		extTC := dir.externalCache[dir.path]
+		extTC.analyze(filename, workingDir, opts)
+	} else {
+		pkgTC := dir.pkgCache[dir.path]
 		pkgTC.analyze(filename, workingDir, opts)
 	}
-	if extTC != nil {
-		extTC.analyze(filename, workingDir, opts)
-	}
-	return nil
 }
 
 func report(fset *token.FileSet, name *ast.Ident, prefix, suffix, workingDir string) {
