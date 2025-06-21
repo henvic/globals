@@ -13,7 +13,7 @@ go install github.com/henvic/globals@latest
 Run the tool in your project directory to list all global variables:
 
 ```shell
-$ globals
+$ globals ./...
 ```
 
 Some flags are available:
@@ -25,8 +25,8 @@ Usage of globals:
     	don't omit global variables of type error
   -include-regexp
     	don't omit global variables of type *regexp.Regexp (regular expressions)
-  -include-tests
-    	don't omit analyzing test files
+  -test
+    	indicates whether test files should be analyzed, too (default true)
   -inits
     	report init functions (default true)
   -vars
@@ -36,7 +36,7 @@ Usage of globals:
 ## Example output
 
 ```shell
-$ globals
+$ globals ./...
 main.go:8: init function
 main.go:12: init function
 main.go:14: var Enabled

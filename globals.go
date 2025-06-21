@@ -1,20 +1,14 @@
 package main
 
 import (
-	"bufio"
 	"flag"
-	"fmt"
 	"go/ast"
-	"go/importer"
-	"go/parser"
 	"go/token"
 	"go/types"
-	"os"
-	"path/filepath"
 	"regexp"
-	"runtime/debug"
-	"strconv"
-	"strings"
+
+	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/singlechecker"
 )
 
 type options struct {
@@ -22,284 +16,104 @@ type options struct {
 	vars   bool
 	errors bool
 	regexp bool
-	tests  bool
-}
-
-type Directory struct {
-	path          string
-	pkgCache      map[string]*typecheck
-	externalCache map[string]*typecheck
-	externalFiles map[string]struct{}
-}
-
-func NewDirectory(path string) *Directory {
-	return &Directory{
-		path:          path,
-		pkgCache:      map[string]*typecheck{},
-		externalCache: map[string]*typecheck{}, // external tests
-		externalFiles: map[string]struct{}{},
-	}
 }
 
 func main() {
-	debug.SetGCPercent(-1)
-	var opts options
-	flag.BoolVar(&opts.vars, "vars", true, "report global variables")
-	flag.BoolVar(&opts.inits, "inits", true, "report init functions")
-	flag.BoolVar(&opts.errors, "include-errors", false, "don't omit global variables of type error")
-	flag.BoolVar(&opts.regexp, "include-regexp", false, "don't omit global variables of type *regexp.Regexp (regular expressions)")
-	flag.BoolVar(&opts.tests, "include-tests", false, "don't omit analyzing test files")
-	flag.Parse()
+	singlechecker.Main(NewAnalyzer())
+}
 
-	workingDir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
-
-	var path string
-	args := flag.Args()
-	switch len(args) {
-	case 0:
-		path = workingDir
-	case 1:
-		path = args[0]
-		if path == "./..." || path == "." {
-			path = workingDir
-		}
-	default:
-		fmt.Fprintln(os.Stderr, "Usage: globals [path]")
-		os.Exit(2)
-	}
-
-	directories := map[string]*Directory{}
-	if err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if d.IsDir() {
-			// Skip vendor and testdata directories.
-			if d.Name() == "vendor" || d.Name() == "testdata" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !opts.tests && strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-
-		if filepath.Ext(path) == ".go" {
-			dir, ok := directories[filepath.Dir(path)]
-			if !ok {
-				dir = NewDirectory(filepath.Dir(path))
-				directories[dir.path] = dir
-
-				if err = dir.parseAndTypeCheck(opts.tests); err != nil {
-					return err
-				}
-			}
-			processFile(dir, path, workingDir, opts)
-		}
-		return nil
-	}); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+func NewAnalyzer() *analysis.Analyzer {
+	return &analysis.Analyzer{
+		Name: "globals",
+		Doc:  "reports global variables and init functions",
+		Flags: func() flag.FlagSet {
+			fs := flag.NewFlagSet("globals", flag.ExitOnError)
+			fs.Bool("inits", true, "report init functions")
+			fs.Bool("vars", true, "report global variables")
+			fs.Bool("include-errors", false, "don't omit global variables of type error")
+			fs.Bool("include-regexp", false, "don't omit global variables of type *regexp.Regexp (regular expressions)")
+			return *fs
+		}(),
+		Run: run,
 	}
 }
 
-// typecheck is a parsed and type-checked Go package.
-type typecheck struct {
-	Files   []*ast.File
-	FileSet *token.FileSet
-	Info    *types.Info
+func run(pass *analysis.Pass) (any, error) {
+	opts := options{
+		inits:  pass.Analyzer.Flags.Lookup("inits").Value.(flag.Getter).Get().(bool),
+		vars:   pass.Analyzer.Flags.Lookup("vars").Value.(flag.Getter).Get().(bool),
+		errors: pass.Analyzer.Flags.Lookup("include-errors").Value.(flag.Getter).Get().(bool),
+		regexp: pass.Analyzer.Flags.Lookup("include-regexp").Value.(flag.Getter).Get().(bool),
+	}
 
-	source    map[string]*ast.File
-	generated map[string]bool
-}
-
-func newTypecheck() *typecheck {
-	return &typecheck{
-		Files:   []*ast.File{},
-		FileSet: token.NewFileSet(),
-		Info: &types.Info{
-			Defs: make(map[*ast.Ident]types.Object),
-			Uses: make(map[*ast.Ident]types.Object),
-		},
-		source:    map[string]*ast.File{},
-		generated: map[string]bool{},
-	}
-}
-
-func (tc *typecheck) File(name string) (*ast.File, bool) {
-	if f, ok := tc.source[name]; ok {
-		return f, tc.generated[name]
-	}
-	return nil, false
-}
-
-func (tc *typecheck) Check(dir string) error {
-	// Using default importer typically will only work in case where the build cache is hot,
-	// and using ForCompiler is too slow. We try the default importer first,
-	// and if it fails with "can't find import", we fall back to ForCompiler.
-	conf := types.Config{
-		Importer: importer.Default(),
-	}
-	_, err := conf.Check(dir, tc.FileSet, tc.Files, tc.Info)
-	if err != nil && strings.Contains(err.Error(), "can't find import") {
-		conf.Importer = importer.ForCompiler(tc.FileSet, "source", nil)
-		_, err = conf.Check(dir, tc.FileSet, tc.Files, tc.Info)
-	}
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (tc *typecheck) AddFile(filename string) error {
-	f, err := parser.ParseFile(tc.FileSet, filename, nil, parser.SkipObjectResolution)
-	if err != nil {
-		return fmt.Errorf("parsing: %w", err)
-	}
-	tc.Files = append(tc.Files, f)
-	tc.source[filename] = f
-	tc.generated[filename] = isGeneratedFile(filename)
-	return nil
-}
-
-func (tc *typecheck) analyze(filename, workingDir string, opts options) {
-	file, gen := tc.File(filename)
-	if gen || file == nil {
-		return
-	}
-	for _, decl := range file.Decls {
-		if opts.inits {
-			tc.analyzeInit(decl, workingDir) // init() functions
-		}
-		if opts.vars {
-			tc.analyzeGlobalVar(decl, workingDir, opts) // global variables
-		}
-	}
-}
-
-func (tc *typecheck) analyzeGlobalVar(decl ast.Decl, workingDir string, opts options) {
-	// Global variables
-	genDecl, ok := decl.(*ast.GenDecl)
-	if !ok || genDecl.Tok != token.VAR {
-		return
-	}
-	for _, spec := range genDecl.Specs {
-		valueSpec, ok := spec.(*ast.ValueSpec)
-		if !ok {
+	for _, file := range pass.Files {
+		// Skip generated files
+		if isGeneratedFile(file) {
 			continue
 		}
-		for _, name := range valueSpec.Names {
-			if name.String() == "_" {
-				break
-			}
-			if !opts.errors {
-				// Skip variables of type error.
-				if obj := tc.Info.Defs[name]; obj != nil {
-					if typ := obj.Type(); typ != nil {
-						// Directly error type.
-						if typ.String() == "error" {
-							break
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.GenDecl:
+				// Global variables.
+				if d.Tok == token.VAR && opts.vars {
+					for _, spec := range d.Specs {
+						vs, ok := spec.(*ast.ValueSpec)
+						if !ok {
+							continue
 						}
-						// Implements error interface
-						if types.Implements(typ, errorInterface) || types.Implements(types.NewPointer(typ), errorInterface) {
-							break
+						for _, name := range vs.Names {
+							if name.Name == "_" {
+								continue
+							}
+							obj := pass.TypesInfo.Defs[name]
+							if obj == nil {
+								continue
+							}
+							typ := obj.Type()
+							if typ == nil {
+								continue
+							}
+							if !opts.errors {
+								// Skip variables of type error.
+								if typ.String() == "error" ||
+									types.Implements(typ, errorInterface) ||
+									types.Implements(types.NewPointer(typ), errorInterface) {
+									continue
+								}
+							}
+							// Skip variables of type *regexp.Regexp.
+							if !opts.regexp && typ.String() == "*regexp.Regexp" {
+								continue
+							}
+							pass.Reportf(name.Pos(), "var %s", name.Name)
 						}
 					}
 				}
-			}
-			if !opts.regexp {
-				// Skip variables of type *regexp.Regexp.
-				if obj := tc.Info.Defs[name]; obj != nil {
-					typ := obj.Type()
-					if typ != nil && typ.String() == "*regexp.Regexp" {
-						break
-					}
+			case *ast.FuncDecl:
+				// Init functions.
+				if opts.inits && d.Recv == nil && d.Name.Name == "init" {
+					pass.Reportf(d.Name.Pos(), "init function")
 				}
 			}
-			report(tc.FileSet, name, "var", "", workingDir)
 		}
 	}
-}
-
-// analyzeInit checks if the given declaration is an init function and reports it.
-func (tc *typecheck) analyzeInit(decl ast.Decl, workingDir string) {
-	funcDecl, ok := decl.(*ast.FuncDecl)
-	if ok && funcDecl.Recv == nil && funcDecl.Name.Name == "init" {
-		report(tc.FileSet, funcDecl.Name, "", "function", workingDir)
-	}
-}
-
-func isExternalPackageTest(filename string) bool {
-	f, err := parser.ParseFile(token.NewFileSet(), filename, nil, parser.PackageClauseOnly|parser.SkipObjectResolution)
-	return err == nil && f.Name != nil && strings.HasSuffix(f.Name.Name, "_test")
-}
-
-// parseAndTypeCheck parses all .go files in dir and returns the files, fsets, and info.
-func (dir *Directory) parseAndTypeCheck(tests bool) (err error) {
-	pkgTC, extTC := newTypecheck(), newTypecheck()
-	dir.pkgCache[dir.path] = pkgTC
-	dir.externalCache[dir.path] = extTC
-	entries, err := os.ReadDir(dir.path)
-	if err != nil {
-		return fmt.Errorf("reading directory %s: %w", dir.path, err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
-			continue
-		}
-
-		// Note: If buggy behavior happens after changes, check if we forgot to replace this with extTC
-		// if the file is an external test package.
-		tc := pkgTC
-
-		filename := filepath.Join(dir.path, entry.Name())
-		if strings.HasSuffix(entry.Name(), "_test.go") {
-			if !tests {
-				continue
-			}
-
-			// Check if the file is part of an external test package.
-			if isExternalPackageTest(filename) {
-				tc = dir.externalCache[dir.path] // If it's an external test package, use the separate external typecheck.
-				dir.externalFiles[filename] = struct{}{}
-			}
-		}
-
-		if err := tc.AddFile(filename); err != nil {
-			return err
-		}
-	}
-
-	if err := pkgTC.Check(dir.path); err != nil {
-		return err
-	}
-	if err := extTC.Check(dir.path); err != nil {
-		return fmt.Errorf("test package: %w", err)
-	}
-	return nil
+	return nil, nil
 }
 
 // Source of the Regex comes from the Go standard library: https://go-review.googlesource.com/c/go/+/283633
 var generatedRegexp = regexp.MustCompile(`(?m)^// Code generated .* DO NOT EDIT\.$`)
 
-// isGeneratedFile returns true if the file has a "Code generated" comment near the top.
+// isGeneratedFile returns true if the *ast.File has a "Code generated" comment near the top.
 // See https://github.com/golang/go/issues/13560
-func isGeneratedFile(filename string) bool {
-	f, err := os.Open(filename)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for i := 0; i < 10 && scanner.Scan(); i++ {
-		if generatedRegexp.Match(scanner.Bytes()) {
-			return true
+func isGeneratedFile(f *ast.File) bool {
+	for i, cg := range f.Comments {
+		if i > 5 {
+			break // Only check the first few comment groups
+		}
+		for _, c := range cg.List {
+			if generatedRegexp.MatchString(c.Text) {
+				return true
+			}
 		}
 	}
 	return false
@@ -307,32 +121,3 @@ func isGeneratedFile(filename string) bool {
 
 // errorInterface is the type of the built-in error interface.
 var errorInterface = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
-
-func processFile(dir *Directory, filename, workingDir string, opts options) {
-	if _, external := dir.externalFiles[filename]; external {
-		extTC := dir.externalCache[dir.path]
-		extTC.analyze(filename, workingDir, opts)
-	} else {
-		pkgTC := dir.pkgCache[dir.path]
-		pkgTC.analyze(filename, workingDir, opts)
-	}
-}
-
-func report(fset *token.FileSet, name *ast.Ident, prefix, suffix, workingDir string) {
-	position := fset.Position(name.Pos())
-	path := position.Filename
-	// Try to use a relative path unless it escapes the working directory.
-	rel, err := filepath.Rel(workingDir, path)
-	if err == nil && !strings.Contains(rel, "..") {
-		path = rel
-	}
-	res := path + ":" + strconv.Itoa(position.Line) + ": "
-	if prefix != "" {
-		res += prefix + " "
-	}
-	res += name.Name
-	if suffix != "" {
-		res += " " + suffix
-	}
-	fmt.Fprintln(os.Stderr, res)
-}
