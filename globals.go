@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"regexp"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/singlechecker"
@@ -61,6 +62,9 @@ func run(pass *analysis.Pass) (any, error) {
 						if !ok {
 							continue
 						}
+						if embeds(vs) {
+							continue
+						}
 						for _, name := range vs.Names {
 							if name.Name == "_" {
 								continue
@@ -98,6 +102,18 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 	}
 	return nil, nil
+}
+
+// embeds checks if a comment group contains a go:embed directive.
+func embeds(vs *ast.ValueSpec) bool {
+	if vs.Doc != nil {
+		for _, c := range vs.Doc.List {
+			if strings.HasPrefix(c.Text, "//go:embed") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Source of the Regex comes from the Go standard library: https://go-review.googlesource.com/c/go/+/283633

@@ -1,6 +1,7 @@
 package example
 
 import (
+	"embed"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -28,6 +29,12 @@ var (
 
 	HexColor  = regexp.MustCompile(`#(?:[0-9a-fA-F]{3}){1,2}\b`)
 	SomeRegex *regexp.Regexp
+
+	//go:embed file.txt
+	File string
+
+	//go:embed *
+	Dir embed.FS
 )
 
 const (
